@@ -9,9 +9,13 @@ import SwiftUI
 
 @main
 struct InstafilterApp: App {
+    
+    @StateObject private var ph = PhotoHandler()
+    
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            MainView()
+                .environmentObject(ph)
         }
     }
 }
