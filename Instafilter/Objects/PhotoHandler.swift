@@ -16,108 +16,6 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 
 //
-// FilterInputType
-//
-// Enum to define what filter input parameters are supported in the app.
-// Also stores the Core Image string keys needed to set those filters
-// within the Core Image object.
-//
-enum FilterInputType: String {
-    case intensity = "Intensity"
-    case radius = "Radius"
-    case scale = "Scale"
-    case none = "No Filter Input"
-    
-    func getKey() -> String {
-        switch self {
-            case .intensity:
-                return kCIInputIntensityKey
-            case .radius:
-                return kCIInputRadiusKey
-            case .scale:
-                return kCIInputScaleKey
-            case .none:
-                return ""
-        }
-    }
-}
-
-//
-// FilterType
-//
-// Enum storing the Core Image filters supported by the app. The
-// raw strings for each case correspond to the naming within the
-// Core Image app and are appropriate to use for display. The
-// enum also supports a function to provide which inputs are
-// supported for a give filter and the range to be allowed for
-// that input on that filter. The enum also provides an init
-// function to allocate the Core Image instance of a filter
-// corresponding to the case.
-//
-enum FilterType: String {
-    case crystallize = "Crystallize"
-    case edges = "Edges"
-    case gaussianBlur = "Gaussian Blur"
-    case pixellate = "Pixellate"
-    case sepiaTone = "Sepia Tone"
-    case unsharpMask = "Unsharp Mask"
-    case vignette = "Vignette"
-    case none = "No Filter Set"
-    
-    //
-    // inputType
-    //
-    // Returns inputs supported and the range for that input for the given filter.
-    //
-    func inputType() -> [(input: FilterInputType, range: ClosedRange<Double>)] {
-        switch self {
-            case .crystallize:
-                return [(.radius, 1.0...200.0)]
-            case .edges:
-                return [(.intensity, 0.0...1.0)]
-            case .gaussianBlur:
-                return [(.radius, 1.0...200.0)]
-            case .pixellate:
-                return [(.scale, 1.0...10.0)]
-            case .sepiaTone:
-                return [(.intensity, 0.0...1.0)]
-            case .vignette:
-                return [(.intensity, 0.0...2.0), (.radius, 1.0...200.0)]
-            case .unsharpMask:
-                return [(.intensity, 0.0...1.0), (.radius, 1.0...200.0)]
-            case .none:
-                return [(.intensity, 0.0...1.0)]
-        }
-    }
-    
-    //
-    // initFilter
-    //
-    // Allocates an instance of the given filter from Core Image and returns it.
-    //
-    func initFilter() -> CIFilter {
-        switch self {
-            case .crystallize:
-                return CIFilter.crystallize()
-            case .edges:
-                return CIFilter.edges()
-            case .gaussianBlur:
-                return CIFilter.gaussianBlur()
-            case .pixellate:
-                return CIFilter.pixellate()
-            case .sepiaTone:
-                return CIFilter.sepiaTone()
-            case .vignette:
-                return CIFilter.vignette()
-            case .unsharpMask:
-                return CIFilter.unsharpMask()
-            case .none:
-                return CIFilter.sepiaTone()
-        }
-    }
-}
-
-//
 // FilterInput
 //
 // Helper class to track the state of a given filter input.
@@ -148,33 +46,45 @@ class FilterInput: ObservableObject {
 //
 class PhotoHandler: ObservableObject {
     
-    // Image selected from the Photo picker for the user's photo library.
-    // We persist it here in case the user wants to save it. It contains
-    // all processing applied to processedImage as it is used in the
-    // the conversion from a core image.
-    private var pickerImage_ui:UIImage? = nil
+    // originalImage is the image downloaded with the picker from the photo
+    // library. It is only ever udpated if the image is saved. prevFilteredImage
+    // is the image with any previous filters applied to it. Thus, if a user
+    // uses sepia, and is currently using crystallize, prevFilteredImage will
+    // have the sepia effect on it. The ph will apply the current filter to this
+    // image based on slider value. currentFilterImage contains that current filter.
+    // It is used for display and to be saved to disk.
+    private var originalImage_ui:UIImage? = nil
+    private var prevFilteredImage_ui:UIImage? = nil
+    private var currentFilteredImage_ui:UIImage? = nil
     
-    // Image displayed in the main UI with filter effects applied
-    private var processedImage_ui:UIImage? = nil
+    // client SwiftUI image to display
+    @Published var displayImage:Image? = nil
+    
+    // The set filter type to be used by CoreImage.
+    @Published private(set) var filterType:FilterType = .none
+    
+    // Array of filter inputs supported by a filter and loaded from
+    // FilterHandler
+    @Published var filterInputs:[FilterInput] = []
     
     // The main CoreImage filter. We are using CIFilter instead
     // of a specific filter type so we can hold different filters
     // in the same variable.
-    private var filter_ci:CIFilter = CIFilter.sepiaTone()
-    private(set) var filterType:FilterType = .sepiaTone
-    
-    @Published var filterInputs:[FilterInput] = []
-    @Published var processedImage:Image? = nil
-    
+    private var filter_ci:CIFilter?
+
     // Expensive to allocate. Only allocate once.
     let ciContext = CIContext()
     
-    // Will setup filter and inputs for .sepiatone
+    // I would expect, eventually, for this to be read out of persistent memory.
+    // For now I will init as if its the first run and put the first 5 filters
+    // in the filter enum in the list.
+    let top5Filters:[String] = FilterType.listOfFilters(limit:5)
+
+    //init to a blank filter
     init() {
-        setFilter(.sepiaTone)
+        setFilter(.none)
     }
     
-    //
     // setFilter
     //
     // A new filter has been selected by the client. the filterInput dictionary
@@ -184,17 +94,30 @@ class PhotoHandler: ObservableObject {
     //
     // Leaving this function the filter has been setup but no filter inputs
     // have been configured (such as intensity, radius, or scale).
-    //
     func setFilter(_ newFilterType:FilterType) {
-        
-        // Clear out old filter input info.
-        filterInputs.removeAll()
+                
         filterType = newFilterType
         filter_ci = newFilterType.initFilter()
+        filterInputs.removeAll()
         
-
+        // No matter what persist any changes made to the current image
+        persistChanges()
+        
+        // Nothing else to do if there is no filter type
+        guard newFilterType != .none else {
+            print("setFilter: Filter type of .none is set.")
+            return
+        }
+        
+        guard let inputType = filterType.inputType() else {
+            print("setFilter: filterType.inputType returned nil")
+            return
+        }
+        
+        print("setFilter: filterType of \(filterType.rawValue) is set.")
+        
         // Configure inputs supported by this filter.
-        for inputTuple in filterType.inputType() {
+        for inputTuple in inputType {
                         
             print("configureInputs: Configuring input \(inputTuple.input.rawValue) with range \(inputTuple.range)")
             
@@ -208,50 +131,72 @@ class PhotoHandler: ObservableObject {
         }
     }
     
-    //
     // setFilterInputLevel
     //
     // Allows a caller to set the leven of the specified input type
-    //
     func setFilterInputLevel(_ type:FilterInputType, value:Double) {
   
         filterInputs = filterInputs.map { input -> FilterInput in
             let newInput = input
             if input.type == type {
                 newInput.value = value
+                print("setFilterInputLevel: \(type.rawValue) = \(value)")
+            } else {
+                print("setFilterInputLevel: Input type not found.")
             }
+            
             return newInput
         }
 
         // A level has been changed, let's reprocess the image.
-        loadAndProcessImage()
+        processImage()
     }
     
+    // loadNewImage
     //
-    // loadAndProcessImage
-    //
-    // Called when pickerImage_ui changes (via the ImagePicker view that allows
+    // Called when originalImage_ui changes (via the ImagePicker view that allows
     // the user to select something from the photo library. When pickerImage_ui
     // changes (via a binding of it to ImagePIcker), then the loadImage func here
     // is called.
-    //
-    func loadAndProcessImage(_ pickerImage_ui:UIImage? = nil) {
+    func loadNewImage(_ newImage_ui:UIImage?) {
         
-        // If there is a new pickerImage, then load it into the member variable.
-        // if not, then it will use the old.
-        if let pickerImage_ui = pickerImage_ui {
-            self.pickerImage_ui = pickerImage_ui
+        guard let newImage_ui = newImage_ui else {
+            print("loadNewImage: Passed a nil image.")
+            return
         }
+
+        self.originalImage_ui = newImage_ui
+        self.prevFilteredImage_ui = newImage_ui
+        self.currentFilteredImage_ui = newImage_ui
+        
+        displayImage = Image(uiImage: newImage_ui)
+    }
+    
+
+    // processImage
+    //
+    // Applies filter to the prevFilteredImage to produce the currentFilteredImage.
+    // If filtering is successful updates the displayImage.
+    func processImage() {
         
         // Unwrap pickerImage_ui
-        guard let pickerImage_ui = self.pickerImage_ui else { return }
+        guard let prevFilteredImage_ui = self.prevFilteredImage_ui else { return }
         
         // Convert the selected UIImage to a CIImage - which is the only thing
         // CoreImage can process.
-        let pickerImage_ci = CIImage(image: pickerImage_ui)
+        let prevFilteredImage_ci = CIImage(image: prevFilteredImage_ui)
+        
+        // If filter_ci is nil, there is no filter, so we should store the input
+        // image as is so it can be rendered in the above view.
+        guard let filter_ci = filter_ci else {
+            print("processImage: filter_ci is nil, setting processed image to picker image.")
+           // processedImage_ui = workingImage_ui  //need to fix this.
+            displayImage = Image(uiImage: prevFilteredImage_ui)
+            return
+        }
         
         // I guess this stores the image in the filter identified by an inputkey
-        filter_ci.setValue(pickerImage_ci, forKey: kCIInputImageKey)
+        filter_ci.setValue(prevFilteredImage_ci, forKey: kCIInputImageKey)
         
         //
         // This worked when currentFilter was a CISepiaTone. When we moved to using
@@ -272,28 +217,75 @@ class PhotoHandler: ObservableObject {
                 filter_ci.setValue(input.value, forKey: input.type.getKey())
             }
         }
-
+        // TODO: should I set the filter_ci to nil if this fails?
+        //
         // Now that the filter is setup, we can grab the outputImage from it,
         // which is a CIImage.
-        guard let processedImage_ci:CIImage = filter_ci.outputImage else { return }
-        
+        guard let currentFilteredImage_ci:CIImage = filter_ci.outputImage else {
+            print("processImage: CI output image creation failed.")
+            //processedImage_ui = workingImage_ui //need to fix
+            displayImage = Image(uiImage: prevFilteredImage_ui)
+            
+            return
+        }
+            
         // Now, convert that CIImage to a CGImage
-        guard let processedImage_cg = ciContext.createCGImage(processedImage_ci, from: processedImage_ci.extent) else { return }
+        guard let currentFilteredImage_cg:CGImage = ciContext.createCGImage(currentFilteredImage_ci, from: currentFilteredImage_ci.extent) else {
+            print("processImage: CG image creation failed.")
+            //processedImage_ui = workingImage_ui
+            displayImage = Image(uiImage: prevFilteredImage_ui)
+            return
+        }
 
-        processedImage_ui = UIImage(cgImage: processedImage_cg)
-        processedImage = Image(uiImage: processedImage_ui!)
+        self.currentFilteredImage_ui = UIImage(cgImage: currentFilteredImage_cg)
+        displayImage = Image(uiImage: self.currentFilteredImage_ui!)
     }
     
+    // resetImage
     //
+    // Move back to original image.
+    func resetImage() {
+        
+        guard let originalImage_ui = originalImage_ui else {
+            print("resetImage: originalImage_ui is nil. Setting workingImage to nil as well.")
+
+            prevFilteredImage_ui = nil
+            currentFilteredImage_ui = nil
+            displayImage = nil
+            
+            return
+        }
+
+        prevFilteredImage_ui = originalImage_ui
+        currentFilteredImage_ui = originalImage_ui
+
+        displayImage = Image(uiImage: originalImage_ui)
+    }
+    
+    // persistChanges
+    //
+    // Pushes currentFilterChanges into prevFilterChanges when the user
+    // selects another filter.
+    func persistChanges() {
+        
+        prevFilteredImage_ui = currentFilteredImage_ui//todo - anything more?
+    }
+    
     // saveImage
     //
     // Saves an image to the photo library.
     //
+    // TODO: need to make sure change have happened before allowing save.
     func saveImage(_ callback:((Error?) -> Void)?) {
           
-        guard let processedImage_ui = processedImage_ui else { return }
+        guard let saveImage_ui = currentFilteredImage_ui else { return }
+        
+        // persist changes into all images so it will be just like loading
+        // a new image from the photo library.
+        prevFilteredImage_ui = saveImage_ui
+        originalImage_ui = saveImage_ui
         
         let imageSaver = ImageSaver(handler:callback)
-        imageSaver.writeToPhotoAlbum(image: processedImage_ui)
+        imageSaver.writeToPhotoAlbum(image: saveImage_ui)
     }
 }

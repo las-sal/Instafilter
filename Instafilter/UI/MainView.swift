@@ -9,60 +9,38 @@ import SwiftUI
 
 
 struct MainView: View {
-        
+    
+    @EnvironmentObject var ph:PhotoHandler
+    @State var selectedFilter:String?
+    
     var body: some View {
         NavigationView {
             VStack {
-                Divider()
-                    .background(.ultraThinMaterial)
-                Spacer()
-                PhotoStackView()
-                Spacer()
+
+                PhotoStackView(selectedFilter:$selectedFilter)
                 FilterControlView()
-               // ButtonView()
+                ScrollingPicker(titles:ph.top5Filters, finalTitle:"More...", selectedFilter:$selectedFilter)
             }
             .navigationTitle("Instafilter")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItemGroup(placement: .navigationBarTrailing) {
-                    Button() {
-                        
-                    } label: {
-                        Image(systemName: "gearshape.fill")
-                    }
-                }
-                ToolbarItemGroup(placement: .bottomBar) {
-                    Button("Change Filter") {
-                       // bShowFilterSheet = true
-                    }
-                 //   .buttonStyle_sal1()
-                    
-                    Button("Save") {
-                        
-                    /*    ph.saveImage() { error in
-                            if let error = error {
-                                saveAlertMessage = "Save Failed. Error \(error.localizedDescription)."
-                            }
-                            else {
-                                saveAlertMessage = "Save Succeeded!"
-                            }
-                            bShowSaveAlert = true
-                        }*/
-                    }
-                 //   .buttonStyle_sal1()
-                //    .disabled(ph.processedImage == nil)
-                    Button("Clear") {
-                  //      bShowFilterSheet = true
-                    }
-                    .buttonStyle_sal1()
-                }
 
-            }
             .background(.ultraThickMaterial)
             .tint(Color.primary)
-          //  .padding([.bottom])
         }
         .preferredColorScheme(.dark)
+        .toolbarSaveClear(selectedFilter:$selectedFilter)
+        .onChange(of: selectedFilter) { _ in
+                
+            guard let selectedFilter = selectedFilter else {
+                print("OCO_selectedFilter: selectedFilter unwrap failed")
+                ph.setFilter(.none)
+                return
+            }
+            
+            if let newFilter = FilterType(rawValue: selectedFilter) {
+                ph.setFilter(newFilter)
+            }
+        }
     }
 }
 
